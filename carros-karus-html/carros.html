@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Carros OSM - Jogo de Corrida no OpenStreetMap</title>
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  #map { height: 100vh; width: 100%; z-index: 1; }
+  .leaflet-top, .leaflet-bottom { z-index: 999; }
+  .ui-panel {
+    position: absolute;
+    top: 1rem;
+    left: 1rem;
+    z-index: 2000;
+    background: rgba(255, 255, 255, 0.95);
+    padding: 1.5rem;
+    border-radius: 1rem;
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.2);
+    min-width: 220px;
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(255,255,255,0.6);
+  }
+  .car-icon {
+    position: relative;
+    width: 32px;
+    height: 20px;
+    background: #ef4444;
+    border-radius: 4px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+    transform-origin: center;
+    transition: transform 0.05s linear;
+  }
+  .car-icon::before {
+    content: '';
+    position: absolute;
+    top: -6px; left: 2px; right: 2px; height: 6px;
+    background: #fbbf24;
+    border-radius: 2px 2px 0 0;
+  }
+  .car-icon::after {
+    content: '';
+    position: absolute;
+    bottom: -4px; left: 2px; width: 8px; height: 4px;
+    background: #1f2937; border-radius: 2px;
+  }
+  .coin-icon {
+    width: 20px; height: 20px;
+    background: #fbbf24;
+    border-radius: 50%;
+    box-shadow: 0 0 0 3px rgba(251,191,36,0.3);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: bold; color: #78350f;
+    border: 2px solid #ffffff;
+  }
+  .modal {
+    display: none;
+    position: absolute;
+    inset: 0;
+    z-index: 3000;
+    background: rgba(0,0,0,0.7);
+    backdrop-filter: blur(6px);
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    text-align: center;
+  }
+  .modal.show { display: flex; }
+  .btn {
+    margin-top: 1rem;
+    padding: 0.75rem 1.5rem;
+    background: #ef4444;
+    color: white;
+    border: none;
+    border-radius: 0.5rem;
+    font-weight: bold;
+    cursor: pointer;
+    font-size: 1rem;
+    transition: background 0.2s;
+  }
+  .btn:hover { background: #dc2626; }
+  .controls-hint {
+    margin-top: 1rem;
+    font-size: 0.85rem;
+    color: #6b7280;
+    font-family: monospace;
+    line-height: 1.6;
+  }
+</style>
+</head>
+<body class="bg-gray-100 font-sans m-0 p-0 overflow-hidden">
+
+  <div id="map"></div>
+
+  <!-- UI Panel -->
+  <div class="ui-panel">
+    <h1 class="text-lg font-bold text-gray-800 mb-1 flex items-center gap-2">
+      <span>🚗</span> Carros OSM
+    </h1>
+    <p class="text-xs text-gray-500 mb-4">OpenStreetMap + Leaflet</p>
+
+    <div class="grid grid-cols-2 gap-2 mb-3">
+      <div>
+        <div class="text-xs text-gray-400 uppercase tracking-wider">Pontuação</div>
+        <div id="score" class="text-xl font-bold text-gray-800">0</div>
+      </div>
+      <div>
+        <div class="text-xs text-gray-400 uppercase tracking-wider">Tempo</div>
+        <div id="timer" class="text-xl font-bold text-gray-800">60</div>
+      </div>
+    </div>
+
+    <div id="coins-collected" class="text-sm text-green-600 font-medium mb-3">Moedas: 0</div>
+
+    <div class="controls-hint">
+      Setas / WASD para dirigir<br>
+      Colete as moedas 🪙 antes que o tempo acabe!
+    </div>
+  </div>
+
+  <!-- Game Over Modal -->
+  <div id="game-over" class="modal">
+    <h2 class="text-2xl font-bold mb-2">Fim de Jogo!</h2>
+    <p class="mb-6 text-gray-200">Sua pontuação final: <span id="final-score" class="text-yellow-400 font-bold">0</span></p>
+    <button class="btn" onclick="startGame()">Jogar Novamente</button>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    // Estado do jogo
+    let map;
+    let carMarker;
+    let carLayerPoint; // posição do carro em pixels do mapa
+    let carAngle = 0;
+    let coins = [];
+    let score = 0;
+    let timeLeft = 60;
+    let gameRunning = false;
+    let timerInterval;
+    let keys = {};
+
+    const CAR_SPEED = 1.8; // pixels por frame
+    const COIN_RADIUS = 28; // distância para coletar
+
+    // Inicializar mapa OpenStreetMap
+    function initMap() {
+      map = L.map('map', {
+        zoomControl: false,
+        attributionControl: false
+      }).setView([-23.5505, -46.6333], 15); // São Paulo
+
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '© OpenStreetMap contributors'
+      }).addTo(map);
+
+      // Criar marcador do carro (div personalizado)
+      const carIcon = L.divIcon({
+        className: 'custom-car-icon',
+        html: '<div class="car-icon" id="car-gfx"></div>',
+        iconSize: [32, 32],
+        iconAnchor: [16, 16]
+      });
+
+      carMarker = L.marker(map.getCenter(), { icon: carIcon, zIndexOffset: 1000 }).addTo(map);
+      carLayerPoint = map.latLngToLayerPoint(map.getCenter());
+
+      // Ajustar tamanho do carro quando o mapa estiver pronto
+      map.whenReady(() => {
+        updateCarGraphics();
+      });
+    }
+
+    function updateCarGraphics() {
+      const el = document.getElementById('car-gfx');
+      if (!el) return;
+      el.style.transform = `rotate(${carAngle}deg)`;
+      carMarker.setLatLng(map.layerPointToLatLng(carLayerPoint));
+    }
+
+    // Gerar moeda em posição aleatória visível
+    function spawnCoin() {
+      const bounds = map.getBounds();
+      const lat = bounds.getSouth() + Math.random() * (bounds.getNorth() - bounds.getSouth());
+      const lng = bounds.getWest() + Math.random() * (bounds.getEast() - bounds.getWest());
+
+      const coinIcon = L.divIcon({
+        className: 'custom-coin-icon',
+        html: '<div class="coin-icon">🪙</div>',
+        iconSize: [24, 24],
+        iconAnchor: [12, 12]
+      });
+
+      const marker = L.marker([lat, lng], { icon: coinIcon, zIndexOffset: 500 }).addTo(map);
+      const lp = map.latLngToLayerPoint([lat, lng]);
+
+      coins.push({ marker, latlng: [lat, lng], layerPoint: lp, collected: false });
+    }
+
+    function clearCoins() {
+      coins.forEach(c => map.removeLayer(c.marker));
+      coins = [];
+    }
+
+    function spawnInitialCoins(count = 8) {
+      clearCoins();
+      for (let i = 0; i < count; i++) spawnCoin();
+    }
+
+    // Controles de teclado
+    window.addEventListener('keydown', e => keys[e.code] = true);
+    window.addEventListener('keyup', e => keys[e.code] = false);
+
+    function getInputVector() {
+      let x = 0, y = 0;
+      if (keys['ArrowLeft'] || keys['KeyA']) x = -1;
+      if (keys['ArrowRight'] || keys['KeyD']) x = 1;
+      if (keys['ArrowUp'] || keys['KeyW']) y = -1;
+      if (keys['ArrowDown'] || keys['KeyS']) y = 1;
+      return { x, y };
+    }
+
+    function clamp(val, min, max) {
+      return Math.max(min, Math.min(max, val));
+    }
+
+    // Loop principal do jogo
+    let lastTime = 0;
+    function gameLoop(timestamp) {
+      if (!gameRunning) return;
+
+      const dt = timestamp - (lastTime || timestamp);
+      lastTime = timestamp;
+
+      const input = getInputVector();
+
+      if (input.x !== 0 || input.y !== 0) {
+        const len = Math.sqrt(input.x * input.x + input.y * input.y);
+        const dx = (input.x / len) * CAR_SPEED;
+        const dy = (input.y / len) * CAR_SPEED;
+
+        carLayerPoint.x += dx;
+        carLayerPoint.y += dy;
+
+        // Atualizar ângulo do carro baseado na direção
+        const targetAngle = (Math.atan2(dy, dx) * 180 / Math.PI) - 90;
+        carAngle = targetAngle;
+
+        // Manter dentro dos limites do mundo Leaflet (aprox)
+        const worldSize = map.getSize();
+        carLayerPoint.x = clamp(carLayerPoint.x, -worldSize.x * 2, worldSize.x * 3);
+        carLayerPoint.y = clamp(carLayerPoint.y, -worldSize.y * 2, worldSize.y * 3);
+
+        updateCarGraphics();
+      }
+
+      // Verificar coleta de moedas
+      const carLP = carLayerPoint;
+      coins.forEach(coin => {
+        if (coin.collected) return;
+        const dist = Math.hypot(carLP.x - coin.layerPoint.x, carLP.y - coin.layerPoint.y);
+        if (dist < COIN_RADIUS) {
+          coin.collected = true;
+          map.removeLayer(coin.marker);
+          score += 10;
+          document.getElementById('score').textContent = score;
+          document.getElementById('coins-collected').textContent = `Moedas: ${score / 10}`;
+          spawnCoin(); // reposicionar
+        }
+      });
+
+      requestAnimationFrame(gameLoop);
+    }
+
+    function startTimer() {
+      timeLeft = 60;
+      document.getElementById('timer').textContent = timeLeft;
+      clearInterval(timerInterval);
+      timerInterval = setInterval(() => {
+        timeLeft--;
+        document.getElementById('timer').textContent = timeLeft;
+        if (timeLeft <= 0) endGame();
+      }, 1000);
+    }
+
+    function endGame() {
+      gameRunning = false;
+      clearInterval(timerInterval);
+      document.getElementById('final-score').textContent = score;
+      document.getElementById('game-over').classList.add('show');
+    }
+
+    function startGame() {
+      score = 0;
+      gameRunning = true;
+      document.getElementById('score').textContent = '0';
+      document.getElementById('coins-collected').textContent = 'Moedas: 0';
+      document.getElementById('game-over').classList.remove('show');
+
+      // resetar posição do carro ao centro do mapa
+      const center = map.getCenter();
+      carLayerPoint = map.latLngToLayerPoint(center);
+      carAngle = 0;
+      updateCarGraphics();
+
+      spawnInitialCoins(8);
+      startTimer();
+      requestAnimationFrame(gameLoop);
+    }
+
+    // Inicializar quando carregar
+    window.addEventListener('DOMContentLoaded', () => {
+      initMap();
+      startGame();
+    });
+
+    // Redesenhar gráficos ao mover/zoomar o mapa para manter ancoragem
+    map && map.on('move', () => {
+      if (carMarker) updateCarGraphics();
+    });
+  </script>
+</body>
+</html>
